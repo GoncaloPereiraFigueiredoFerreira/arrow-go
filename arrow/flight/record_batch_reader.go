@@ -51,35 +51,45 @@ type dataMessageReader struct {
 }
 
 func (d *dataMessageReader) Message() (*ipc.Message, error) {
-	var (
-		fd  *FlightData
-		err error
-	)
+	for {
+		var (
+			fd  *FlightData
+			err error
+		)
 
-	if d.peeked != nil {
-		fd = d.peeked
-		d.peeked = nil
-	} else {
-		fd, err = d.rdr.Recv()
-	}
-
-	if err != nil {
-		if d.msg != nil {
-			// clear the previous message in the error case
-			d.msg.Release()
-			d.msg = nil
+		if d.peeked != nil {
+			fd = d.peeked
+			d.peeked = nil
+		} else {
+			fd, err = d.rdr.Recv()
 		}
-		d.lastAppMetadata = nil
-		d.descr = nil
-		return nil, err
-	}
 
-	d.lastAppMetadata = fd.AppMetadata
-	if fd.FlightDescriptor != nil {
-		d.descr = fd.FlightDescriptor
+		if err == nil && len(fd.DataHeader) == 0 && len(fd.DataBody) != 0 {
+			err = errors.New("arrow/flight: FlightData body without an IPC header")
+		}
+		if err != nil {
+			if d.msg != nil {
+				// clear the previous message in the error case
+				d.msg.Release()
+				d.msg = nil
+			}
+			d.lastAppMetadata = nil
+			d.descr = nil
+			return nil, err
+		}
+
+		if fd.FlightDescriptor != nil {
+			d.descr = fd.FlightDescriptor
+		}
+		if len(fd.DataHeader) == 0 {
+			// Metadata-only messages do not contain an IPC payload.
+			continue
+		}
+
+		d.lastAppMetadata = fd.AppMetadata
+		d.msg = ipc.NewMessage(memory.NewBufferBytes(fd.DataHeader), memory.NewBufferBytes(fd.DataBody))
+		return d.msg, nil
 	}
-	d.msg = ipc.NewMessage(memory.NewBufferBytes(fd.DataHeader), memory.NewBufferBytes(fd.DataBody))
-	return d.msg, nil
 }
 
 func (d *dataMessageReader) Retain() {
@@ -98,9 +108,9 @@ func (d *dataMessageReader) Release() {
 	}
 }
 
-// Reader is an ipc.Reader which also keeps track of the metadata from
-// the FlightData messages as they come in, calling LatestAppMetadata
-// will return the metadata bytes from the most recently read message.
+// Reader is an ipc.Reader which also keeps track of metadata from FlightData
+// messages with IPC payloads. Metadata-only messages are skipped.
+// LatestAppMetadata returns the metadata from the most recently read IPC payload.
 type Reader struct {
 	*ipc.Reader
 	dmr *dataMessageReader
@@ -162,12 +172,11 @@ func NewRecordReader(r DataStreamReader, opts ...ipc.Option) (*Reader, error) {
 	rdr := &Reader{dmr: &dataMessageReader{rdr: r}}
 	rdr.dmr.refCount.Add(1)
 	rdr.dmr.descr = data.FlightDescriptor
-	if len(data.DataHeader) > 0 {
-		rdr.dmr.peeked = data
-	}
+	rdr.dmr.peeked = data
 
 	rdr.dmr.Retain()
 	if rdr.Reader, err = ipc.NewReaderFromMessageReader(rdr.dmr, opts...); err != nil {
+		rdr.dmr.Release()
 		return nil, fmt.Errorf("arrow/flight: could not create flight reader: %w", err)
 	}
 

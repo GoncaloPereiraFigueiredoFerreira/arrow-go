@@ -526,6 +526,7 @@ func (f *collectingFlightStreamWriter) Send(data *flight.FlightData) error {
 	f.payloads = append(f.payloads, &flight.FlightData{
 		FlightDescriptor: data.FlightDescriptor,
 		DataHeader:       append([]byte(nil), data.DataHeader...),
+		AppMetadata:      append([]byte(nil), data.AppMetadata...),
 		DataBody:         append([]byte(nil), data.DataBody...),
 	})
 	return nil
